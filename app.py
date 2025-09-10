@@ -39,11 +39,16 @@ class Note(SQLModel, table=True):
 # This section contains all the functions that interact with the database and the AI model.
 
 # This function uses Streamlit's cache to load the AI model and database connection
+# This function uses Streamlit's cache to load the AI model and database connection
 # only once, which makes the app much faster.
 @st.cache_resource
 def load_models_and_db():
     model = SentenceTransformer('all-MiniLM-L6-v2')
-    chroma_client = chromadb.Client()
+
+    # THE DEFINITIVE FIX: Use the EphemeralClient to run ChromaDB in-memory.
+    # This completely avoids the disk storage errors on Streamlit Cloud.
+    chroma_client = chromadb.EphemeralClient()
+
     collection = chroma_client.get_or_create_collection(name="notes")
     return model, collection
 
