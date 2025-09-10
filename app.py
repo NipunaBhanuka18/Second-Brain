@@ -44,13 +44,10 @@ class Note(SQLModel, table=True):
 # This function uses Streamlit's cache to load the AI model and database connection
 # only once, which makes the app much faster.
 @st.cache_resource
+@st.cache_resource
 def load_models_and_db():
     model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    # NEW: Explicitly configure ChromaDB to be persistent and use a safe path.
-    # This avoids the default database engine that causes errors on Streamlit Cloud.
-    chroma_client = chromadb.PersistentClient(path="/tmp/chroma_db")
-
+    chroma_client = chromadb.Client() # Revert to the simple client
     collection = chroma_client.get_or_create_collection(name="notes")
     return model, collection
 
