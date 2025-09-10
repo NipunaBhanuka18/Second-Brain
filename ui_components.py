@@ -39,7 +39,7 @@ def answer_question(query: str, model, index, qa_pipeline):
 
 
 # --- SIDEBAR UI ---
-def render_sidebar(model):
+def render_sidebar(model, faiss_index, qa_pipeline):
     with st.sidebar:
         st.header("Second Brain")
         theme = st.radio("Select Theme", ["Dark", "Light"], key="theme_selector")
