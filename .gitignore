@@ -2,3 +2,6 @@ database.db
 chroma/
 __pycache__/
 *.pyc
+
+faiss_index.idx
+id_map.pkl
