@@ -9,10 +9,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 from typing import Optional, List
 import os
 
-if 'STREAMLIT_IN_CLOUD' in os.environ or 'STREAMLIT_SERVER_RUNNING_IN_CLOUD' in os.environ:
-    __import__('pysqlite3')
-    import sys
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 
 
 # --- 2. Database and AI Model Configuration ---
@@ -44,9 +41,16 @@ class Note(SQLModel, table=True):
 # This function uses Streamlit's cache to load the AI model and database connection
 # only once, which makes the app much faster.
 @st.cache_resource
+# This function uses Streamlit's cache to load the AI model and database connection
+# only once, which makes the app much faster.
+@st.cache_resource
 def load_models_and_db():
     model = SentenceTransformer('all-MiniLM-L6-v2')
-    chroma_client = chromadb.Client()
+
+    # NEW: Explicitly configure ChromaDB to be persistent and use a safe path.
+    # This avoids the default database engine that causes errors on Streamlit Cloud.
+    chroma_client = chromadb.PersistentClient(path="/tmp/chroma_db")
+
     collection = chroma_client.get_or_create_collection(name="notes")
     return model, collection
 
