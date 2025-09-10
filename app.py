@@ -41,11 +41,6 @@ class Note(SQLModel, table=True):
 # This function uses Streamlit's cache to load the AI model and database connection
 # only once, which makes the app much faster.
 @st.cache_resource
-# This function uses Streamlit's cache to load the AI model and database connection
-# only once, which makes the app much faster.
-@st.cache_resource
-# Make sure this function is reverted to its simplest form
-@st.cache_resource
 def load_models_and_db():
     model = SentenceTransformer('all-MiniLM-L6-v2')
     chroma_client = chromadb.Client()
