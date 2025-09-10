@@ -33,6 +33,7 @@ if 'summary' not in st.session_state: st.session_state.summary = None
 st.title("🧠 Second Brain")
 
 # Render the sidebar and get the selected theme
+# In app.py
 selected_theme = ui.render_sidebar(model, faiss_index, qa_pipeline)
 
 # The main content area is for primary interaction
