@@ -10,6 +10,8 @@ import datetime
 import re
 from streamlit_agraph import agraph, Node, Edge, Config
 from typing import Optional, List
+from transformers import pipeline
+from sklearn.cluster import KMeans
 
 # --- 2. Database and AI Model Configuration ---
 DATABASE_URL = "sqlite:///database.db"
@@ -67,8 +69,43 @@ class NoteLink(sqlmodel.SQLModel, table=True):
 
 # --- 5. Core Logic and AI Functions ---
 @st.cache_resource
-def load_model():
+def load_embedding_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
+
+
+@st.cache_resource
+def load_generative_models():
+    summarizer = pipeline("summarization", model="google/flan-t5-base")
+    qa_pipeline = pipeline("text2text-generation", model="google/flan-t5-base")
+    return summarizer, qa_pipeline
+
+
+def summarize_text(text: str, summarizer):
+    if len(text.split()) < 50:
+        return "Note is too short to summarize."
+    result = summarizer(text, max_length=150, min_length=30, do_sample=False)
+    return result[0]['summary_text']
+
+
+def cluster_notes(notes: List[Note], num_clusters: int):
+    if len(notes) < num_clusters:
+        return None
+    embeddings = model.encode([note.content for note in notes])
+    kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init='auto').fit(embeddings)
+    clusters = {i: [] for i in range(num_clusters)}
+    for note, label in zip(notes, kmeans.labels_):
+        clusters[label].append(note)
+    return clusters
+
+
+def answer_question(query: str, index, id_map, qa_pipeline):
+    relevant_notes = search_notes(query, index, id_map)
+    if not relevant_notes:
+        return "I couldn't find any relevant notes to answer your question."
+    context = "\n".join([f"Note Title: {note.title}\nContent: {note.content}" for note in relevant_notes])
+    prompt = f"Based on the following notes, please answer the question.\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+    result = qa_pipeline(prompt, max_length=200)
+    return result[0]['generated_text']
 
 
 def create_db_and_tables():
@@ -102,18 +139,6 @@ def update_note_links(note: Note):
                 if target_note.id != note.id:
                     session.add(NoteLink(source_id=note.id, target_id=target_note.id))
         session.commit()
-
-
-def get_outgoing_links(note_id: int):
-    with sqlmodel.Session(engine) as session:
-        return session.exec(sqlmodel.select(Note).join(NoteLink, Note.id == NoteLink.target_id).where(
-            NoteLink.source_id == note_id)).all()
-
-
-def get_backlinks(note_id: int):
-    with sqlmodel.Session(engine) as session:
-        return session.exec(sqlmodel.select(Note).join(NoteLink, Note.id == NoteLink.source_id).where(
-            NoteLink.target_id == note_id)).all()
 
 
 def get_all_notes():
@@ -182,7 +207,7 @@ def update_tags_for_note(note_id: int, selected_tag_names: List[str]):
             if tag_name not in tag_name_to_id:
                 new_tag = Tag(name=tag_name)
                 session.add(new_tag)
-                session.commit()
+                session.commit();
                 session.refresh(new_tag)
                 tag_name_to_id[new_tag.name] = new_tag.id
         session.exec(sqlmodel.delete(NoteTagLink).where(NoteTagLink.note_id == note_id))
@@ -190,16 +215,31 @@ def update_tags_for_note(note_id: int, selected_tag_names: List[str]):
             session.add(NoteTagLink(note_id=note_id, tag_id=tag_name_to_id[tag_name]))
         session.commit()
 
+def get_outgoing_links(note_id: int):
+    """Gets all notes that the given note links to."""
+    with sqlmodel.Session(engine) as session:
+        statement = sqlmodel.select(Note).join(NoteLink, Note.id == NoteLink.target_id).where(NoteLink.source_id == note_id)
+        return session.exec(statement).all()
+
+def get_backlinks(note_id: int):
+    """Gets all notes that link to the given note (backlinks)."""
+    with sqlmodel.Session(engine) as session:
+        statement = sqlmodel.select(Note).join(NoteLink, Note.id == NoteLink.source_id).where(NoteLink.target_id == note_id)
+        return session.exec(statement).all()
+
 
 # --- 6. Application Startup ---
-model = load_model()
+model = load_embedding_model()
+summarizer, qa_pipeline = load_generative_models()
 create_db_and_tables()
 faiss_index, note_id_map = load_faiss_data()
 
+# Initialize session state
 if 'selected_note' not in st.session_state: st.session_state.selected_note = None
 if 'editing' not in st.session_state: st.session_state.editing = None
 if 'graph_data' not in st.session_state: st.session_state.graph_data = None
 if 'tag_filter' not in st.session_state: st.session_state.tag_filter = None
+if 'view' not in st.session_state: st.session_state.view = 'default'
 
 # --- 7. Main Application UI ---
 st.set_page_config(layout="wide")
@@ -215,14 +255,32 @@ with col1:
         if st.form_submit_button("Save Note") and new_title and new_content:
             with sqlmodel.Session(engine) as session:
                 note_to_add = Note(title=new_title, content=new_content)
-                session.add(note_to_add)
-                session.commit()
+                session.add(note_to_add);
+                session.commit();
                 session.refresh(note_to_add)
                 embedding = np.array([model.encode(note_to_add.content)], dtype='float32')
                 faiss_index.add_with_ids(embedding, np.array([note_to_add.id]))
                 save_faiss_data(faiss_index, note_id_map)
                 update_note_links(note_to_add)
                 st.success("Note saved!")
+
+    st.header("🤖 AI Assistant")
+    question = st.text_input("Ask a question about your notes...")
+    if st.button("Get Answer"):
+        st.session_state.view = 'qa'
+        with st.spinner("Synthesizing answer..."):
+            st.session_state.qa_answer = answer_question(question, faiss_index, note_id_map, qa_pipeline)
+
+    st.header("🔍 Topic Clustering")
+    all_notes = get_all_notes()
+    num_clusters = st.number_input("Number of topics to find:", min_value=2, max_value=10, value=3)
+    if st.button("Group Notes"):
+        if len(all_notes) >= num_clusters:
+            st.session_state.view = 'cluster'
+            with st.spinner("Clustering notes..."):
+                st.session_state.clusters = cluster_notes(all_notes, num_clusters)
+        else:
+            st.warning("Not enough notes to create clusters.")
 
     st.header("Search")
     search_query = st.text_input("Find notes by meaning...")
@@ -242,25 +300,40 @@ with col1:
         if st.button("All Notes"): st.session_state.tag_filter = None
         for tag in all_tags:
             if st.button(tag.name, key=f"tag_{tag.id}"): st.session_state.tag_filter = tag
-
         st.header("Notes")
         if st.session_state.tag_filter:
             st.subheader(f"Tagged with: {st.session_state.tag_filter.name}")
             notes_to_display = get_notes_by_tag(st.session_state.tag_filter.id)
         else:
             notes_to_display = get_all_notes()
-
         for note in notes_to_display:
             if st.button(note.title, key=f"note_{note.id}"):
                 st.session_state.selected_note = note
-                st.session_state.editing = None
+                st.session_state.editing = None;
                 st.session_state.graph_data = None
+                st.session_state.view = 'default'  # Reset view
 
 # Main Content (Column 2)
 with col2:
-    if st.session_state.selected_note:
+    if st.session_state.view == 'qa':
+        st.header("AI-Generated Answer")
+        st.write(st.session_state.get("qa_answer", "Something went wrong."))
+        if st.button("Back to Notes"):
+            st.session_state.view = 'default'
+            st.experimental_rerun()
+    elif st.session_state.view == 'cluster' and st.session_state.get('clusters'):
+        st.header("Note Clusters by Topic")
+        for i, notes_in_cluster in st.session_state.clusters.items():
+            with st.expander(f"**Topic {i + 1}** ({len(notes_in_cluster)} notes)"):
+                for note in notes_in_cluster:
+                    st.markdown(f"- **{note.title}**")
+        if st.button("Back to Notes"):
+            st.session_state.view = 'default'
+            st.experimental_rerun()
+    elif st.session_state.selected_note:
+        st.session_state.view = 'default'
         note = st.session_state.selected_note
-        if st.session_state.editing == note.id:
+        if st.session_state.get('editing') == note.id:
             st.header(f"Editing: {note.title}")
             with st.form("edit_note_form"):
                 edited_title = st.text_input("Title", value=note.title)
@@ -268,6 +341,13 @@ with col2:
                 selected_tags = st.multiselect("Tags", options=[t.name for t in all_tags],
                                                default=[t.name for t in current_note_tags])
                 edited_content = st.text_area("Content", value=note.content, height=250)
+                st.subheader("Contextual Suggestions")
+                contextual_suggestions = search_notes(edited_content, faiss_index, note_id_map)
+                if contextual_suggestions:
+                    for suggestion in contextual_suggestions:
+                        if suggestion.id != note.id: st.info(f"**Related idea:** {suggestion.title}")
+                else:
+                    st.write("Keep writing to see related ideas...")
                 uploaded_files = st.file_uploader("Add images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
                 if st.form_submit_button("Save Changes"):
                     with sqlmodel.Session(engine) as session:
@@ -275,20 +355,16 @@ with col2:
                         session.add(
                             NoteVersion(note_id=note.id, title=note_to_update.title, content=note_to_update.content))
                         note_to_update.title, note_to_update.content = edited_title, edited_content
-                        session.add(note_to_update)
+                        session.add(note_to_update);
                         session.commit()
-                        session.refresh(note_to_update)
-
                         faiss_index.remove_ids(np.array([note.id]))
                         new_embedding = np.array([model.encode(edited_content)], dtype='float32')
                         faiss_index.add_with_ids(new_embedding, np.array([note.id]))
                         save_faiss_data(faiss_index, note_id_map)
-
                         for uploaded_file in uploaded_files:
                             session.add(Attachment(note_id=note.id, filename=uploaded_file.name,
                                                    file_data=uploaded_file.getvalue()))
                         session.commit()
-
                     update_note_links(note_to_update)
                     update_tags_for_note(note.id, selected_tags)
                     st.session_state.selected_note = session.get(Note, note.id)
@@ -296,7 +372,7 @@ with col2:
                     st.success("Note updated!")
                     st.experimental_rerun()
         else:
-            c1, c2, c3 = st.columns([4, 1, 1])
+            c1, c2, c3, c4 = st.columns([3, 1, 1, 2])
             with c1:
                 st.header(note.title)
             with c2:
@@ -311,19 +387,26 @@ with col2:
                         session.exec(sqlmodel.delete(Attachment).where(Attachment.note_id == note.id))
                         session.exec(sqlmodel.delete(NoteVersion).where(NoteVersion.note_id == note.id))
                         session.exec(sqlmodel.delete(NoteTagLink).where(NoteTagLink.note_id == note.id))
-                        session.delete(session.get(Note, note.id))
+                        session.delete(session.get(Note, note.id));
                         session.commit()
                         faiss_index.remove_ids(np.array([note.id]))
                         save_faiss_data(faiss_index, note_id_map)
                     st.session_state.selected_note = None
                     st.success("Note deleted!")
                     st.experimental_rerun()
+            with c4:
+                if st.button("✨ Auto-Summarize Note"):
+                    with st.spinner("Generating summary..."):
+                        summary = summarize_text(note.content, summarizer)
+                        st.session_state.summary = summary
+            if 'summary' in st.session_state and st.session_state.summary:
+                st.info(f"**AI Summary:** {st.session_state.summary}")
 
             st.write(note.content)
             current_tags = get_tags_for_note(note.id)
             if current_tags: st.markdown(f"**Tags:** {', '.join([f'`{t.name}`' for t in current_tags])}")
 
-            st.subheader("Linked Notes")
+            st.subheader("Linked Notes");
             link_col1, link_col2 = st.columns(2)
             with link_col1:
                 st.markdown("**Outgoing Links**")
@@ -331,7 +414,7 @@ with col2:
                 if outgoing_links:
                     for link in outgoing_links:
                         if st.button(f"→ {link.title}", key=f"out_{link.id}"):
-                            st.session_state.selected_note = link
+                            st.session_state.selected_note = link;
                             st.experimental_rerun()
                 else:
                     st.info("No outgoing links.")
@@ -341,7 +424,7 @@ with col2:
                 if backlinks:
                     for link in backlinks:
                         if st.button(f"← {link.title}", key=f"back_{link.id}"):
-                            st.session_state.selected_note = link
+                            st.session_state.selected_note = link;
                             st.experimental_rerun()
                 else:
                     st.info("No backlinks.")
@@ -355,7 +438,7 @@ with col2:
                         st.image(att.file_data, caption=att.filename, use_column_width=True)
                     with att_col2:
                         if st.button("Delete Image", key=f"del_att_{att.id}"):
-                            delete_attachment(att.id)
+                            delete_attachment(att.id);
                             st.experimental_rerun()
             else:
                 st.info("No attachments.")
@@ -371,7 +454,7 @@ with col2:
                                 session.add(NoteVersion(note_id=note.id, title=current_note.title,
                                                         content=current_note.content))
                                 current_note.title, current_note.content = version.title, version.content
-                                session.add(current_note)
+                                session.add(current_note);
                                 session.commit()
                                 faiss_index.remove_ids(np.array([note.id]))
                                 new_embedding = np.array([model.encode(version.content)], dtype='float32')
@@ -379,12 +462,12 @@ with col2:
                                 save_faiss_data(faiss_index, note_id_map)
                                 update_note_links(current_note)
                             st.session_state.selected_note = session.get(Note, note.id)
-                            st.success("Note reverted!")
+                            st.success("Note reverted!");
                             st.experimental_rerun()
                 else:
                     st.info("No previous versions found.")
 
-            st.subheader("Related Ideas")
+            st.subheader("AI-Suggested Related Ideas")
             related = get_related_notes(note, faiss_index, note_id_map)
             if related:
                 for r_note in related:
@@ -393,9 +476,12 @@ with col2:
                 st.info("No related ideas found.")
     else:
         st.header("Select or create a note.")
+        if st.button("Generate Full Knowledge Graph"):
+            st.session_state.view = 'graph'
+            st.experimental_rerun()
 
-    st.header("Knowledge Graph")
-    if st.button("Generate Full Graph"):
+    if st.session_state.view == 'graph':
+        st.header("Your Second Brain Map")
         nodes, edges = [], []
         all_notes_for_graph = get_all_notes()
         note_ids_set = {note.id for note in all_notes_for_graph}
@@ -405,10 +491,8 @@ with col2:
             for r_note in related:
                 if r_note.id in note_ids_set:
                     edges.append(Edge(source=str(note.id), target=str(r_note.id)))
-        st.session_state.graph_data = (nodes, edges)
-
-    if st.session_state.graph_data:
-        nodes, edges = st.session_state.graph_data
         config = Config(width=800, height=600, directed=True, physics=True, hierarchical=False)
-        st.info("Displaying the knowledge graph of all notes.")
         agraph(nodes=nodes, edges=edges, config=config)
+        if st.button("Back to Notes"):
+            st.session_state.view = 'default'
+            st.experimental_rerun()
