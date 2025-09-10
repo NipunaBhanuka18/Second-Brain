@@ -1,0 +1,4 @@
+database.db
+chroma/
+__pycache__/
+*.pyc
