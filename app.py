@@ -118,8 +118,12 @@ st.title("🧠 Second Brain")
 
 col1, col2 = st.columns([1, 2])
 
-# Sidebar (Column 1)
+# --- UI Layout ---
+# ... (The st.set_page_config, st.title, and col1, col2 lines are the same) ...
+
+# The first column acts as a sidebar for controls and lists.
 with col1:
+    # A form for creating a new note.
     st.header("Create New Note")
     with st.form("new_note_form", clear_on_submit=True):
         new_title = st.text_input("Title")
@@ -135,29 +139,44 @@ with col1:
                 # Add to FAISS
                 embedding = np.array([model.encode(note_to_add.content)], dtype='float32')
                 faiss_index.add_with_ids(embedding, np.array([note_to_add.id]))
-                save_faiss_data(faiss_index, note_id_map)  # Persist changes
+                save_faiss_data(faiss_index, note_id_map)
                 st.success("Note saved!")
 
+    # --- NEW HYBRID SEARCH SECTION ---
     st.header("Search")
-    search_query = st.text_input("Find notes by meaning...")
+    all_notes = get_all_notes()  # Get all notes once for both lists
+    search_query = st.text_input("Type to get suggestions or press Enter for AI search...")
+
+    # 1. INSTANT SUGGESTIONS (KEYWORD AUTOCOMPLETE)
     if search_query:
+        # Filter notes whose titles start with the search query (case-insensitive)
+        suggestions = [note for note in all_notes if note.title.lower().startswith(search_query.lower())]
+        if suggestions:
+            st.subheader("Suggestions")
+            for note in suggestions:
+                if st.button(note.title, key=f"suggestion_{note.id}"):
+                    st.session_state.selected_note = note
+                    st.session_state.editing = None
+
+        # 2. DEEP SEARCH (AI-POWERED)
+        st.subheader(f"AI Search Results for '{search_query}'")
         search_results = search_notes(search_query, faiss_index, note_id_map)
-        st.subheader("Search Results")
         if search_results:
             for note in search_results:
                 if st.button(note.title, key=f"search_{note.id}"):
                     st.session_state.selected_note = note
                     st.session_state.editing = None
         else:
-            st.info("No relevant notes found.")
+            st.info("No semantic matches found.")
 
-    st.header("All Notes")
-    all_notes = get_all_notes()
-    for note in all_notes:
-        if st.button(note.title, key=f"note_{note.id}"):
-            st.session_state.selected_note = note
-            st.session_state.editing = None
-            st.session_state.graph_data = None
+    # The list of all notes (only shown when not searching)
+    if not search_query:
+        st.header("All Notes")
+        for note in all_notes:
+            if st.button(note.title, key=f"note_{note.id}"):
+                st.session_state.selected_note = note
+                st.session_state.editing = None
+                st.session_state.graph_data = None
 
 # Main Content (Column 2)
 with col2:
