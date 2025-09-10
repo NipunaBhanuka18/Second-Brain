@@ -7,6 +7,13 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from streamlit_agraph import agraph, Node, Edge, Config
 from typing import Optional, List
+import os
+
+if 'STREAMLIT_IN_CLOUD' in os.environ or 'STREAMLIT_SERVER_RUNNING_IN_CLOUD' in os.environ:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 
 # --- 2. Database and AI Model Configuration ---
 # Here, we define the database connection, load the AI models, and set constants.
