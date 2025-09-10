@@ -1,7 +1,6 @@
 # database.py
 
 import sqlmodel
-from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 import pickle
@@ -9,12 +8,14 @@ import os
 import datetime
 import re
 from typing import Optional, List
+from sentence_transformers import SentenceTransformer
 
 # --- Constants and Engine ---
 DATABASE_URL = "sqlite:///database.db"
 engine = sqlmodel.create_engine(DATABASE_URL, echo=False)
 FAISS_INDEX_PATH = "faiss_index.idx"
 ID_MAP_PATH = "id_map.pkl"
+SIMILARITY_THRESHOLD = 1.1
 
 # --- Database Models ---
 class Note(sqlmodel.SQLModel, table=True):
@@ -61,18 +62,13 @@ def create_db_and_tables():
 def load_faiss_data(model: SentenceTransformer):
     if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(ID_MAP_PATH):
         index = faiss.read_index(FAISS_INDEX_PATH)
-        with open(ID_MAP_PATH, "rb") as f:
-            id_map = pickle.load(f)
     else:
         embedding_dim = model.get_sentence_embedding_dimension()
         index = faiss.IndexIDMap(faiss.IndexFlatL2(embedding_dim))
-        id_map = {}
-    return index, id_map
+    return index
 
-def save_faiss_data(index, id_map):
+def save_faiss_data(index):
     faiss.write_index(index, FAISS_INDEX_PATH)
-    with open(ID_MAP_PATH, "wb") as f:
-        pickle.dump(id_map, f)
 
 def update_note_links(note: Note):
     with sqlmodel.Session(engine) as session:
@@ -110,20 +106,20 @@ def delete_attachment(attachment_id: int):
         session.delete(session.get(Attachment, attachment_id))
         session.commit()
 
-def get_related_notes(note: Note, model: SentenceTransformer, index, id_map, threshold: float):
+def get_related_notes(note: Note, model: SentenceTransformer, index):
     if not note or index.ntotal == 0: return []
     query_embedding = np.array([model.encode(note.content)], dtype='float32')
     distances, ids = index.search(query_embedding, k=min(6, index.ntotal))
-    similar_note_ids = [ids[0][i] for i, dist in enumerate(distances[0]) if ids[0][i] != note.id and dist <= threshold]
+    similar_note_ids = [ids[0][i] for i, dist in enumerate(distances[0]) if ids[0][i] != note.id and dist <= SIMILARITY_THRESHOLD]
     if not similar_note_ids: return []
     with sqlmodel.Session(engine) as session:
         return session.exec(sqlmodel.select(Note).where(Note.id.in_(similar_note_ids))).all()
 
-def search_notes(query: str, model: SentenceTransformer, index, id_map, threshold: float):
+def search_notes(query: str, model: SentenceTransformer, index):
     if not query or index.ntotal == 0: return []
     query_embedding = np.array([model.encode(query)], dtype='float32')
     distances, ids = index.search(query_embedding, k=min(5, index.ntotal))
-    similar_note_ids = [int(id) for id, dist in zip(ids[0], distances[0]) if dist <= threshold]
+    similar_note_ids = [int(id) for id, dist in zip(ids[0], distances[0]) if dist <= SIMILARITY_THRESHOLD]
     if not similar_note_ids: return []
     with sqlmodel.Session(engine) as session:
         return session.exec(sqlmodel.select(Note).where(Note.id.in_(similar_note_ids))).all()
